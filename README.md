@@ -12,6 +12,7 @@ A [Pi Coding Agent](https://github.com/earendil-works/pi) extension that **sniff
 - **Session lifecycle tracking** — start, shutdown, requests, and responses
 - **Queue-based request/response correlation** per model for better latency tracking under concurrent requests
 - **Non-blocking async log writes** that preserve event order
+- **Session summary** includes token totals, cache totals, estimated cost, pretty mode, and model filter
 - **Persistent config** stored in `~/.pi/pi-http-sniff.json`
 - **UI notifications** for config changes and errors
 
@@ -42,21 +43,27 @@ pnpm build
 Register a session command via `httpsniff`:
 
 ```
-httpsniff [modelName|all] [pretty]
+httpsniff [modelName|all] [pretty] | pretty|summary|stats|help
 ```
 
 | Argument | Description | Example |
 |---|---|---|
 | `modelName` | Specific model ID/name to filter, or `all` | `httpsniff gpt-4o` |
-| `pretty` | Enable pretty-printed JSON output (default: compact) | `httpsniff all pretty` |
+| `pretty` | When used with a model, enable pretty output; when used alone, toggle pretty mode | `httpsniff pretty` |
+| `summary` / `stats` | Show current session token, cache, cost, pretty mode, and filter summary | `httpsniff summary` |
+| `help` | Show the built-in usage text | `httpsniff help` |
 
 ### Examples
 
 ```
 httpsniff all                      # Log all models, compact JSON
 httpsniff gpt-4o                   # Log only gpt-4o, compact JSON
+httpsniff pretty                   # Toggle pretty mode on/off
 httpsniff all pretty               # Log all models, pretty-printed
 httpsniff claude-sonnet-4-20250514 pretty  # Log specific model, pretty-printed
+httpsniff summary                  # Show session summary
+httpsniff stats                    # Show session summary
+httpsniff help                     # Show usage text
 ```
 
 ### Config file
@@ -77,6 +84,7 @@ Logs are written to `~/.pi/logs/pi-http-sniff-{sessionId}.jsonl`.
 - Compact mode (`prettyPrint: false`) writes one JSON object per line (JSONL-compatible).
 - Pretty mode (`prettyPrint: true`) writes human-readable multiline JSON blocks.
 - `after_provider_response` events are always logged. The hook payload currently includes `status` and `headers` but no model identifier, so strict per-model filtering is not available for that specific event.
+- When `pretty` is used on its own, it toggles the persisted `prettyPrint` setting and displays a warning that pretty logs increase file size.
 
 ## Use cases
 

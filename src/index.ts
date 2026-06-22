@@ -105,11 +105,12 @@ export default function (pi: ExtensionAPI) {
   // Helper function to save config
   const saveConfig = (ctx: ExtensionContext | undefined, config: PiHttpSniffConfig): void => {
     try {
-      writeFileSync(configPath, JSON.stringify(config, null, 2), {
+      const data = JSON.stringify(config, null, 2);
+      writeFileSync(configPath, data, {
         flag: 'w',
         encoding: 'utf8',
       });
-      ctx?.ui.notify('pi-http-sniff configuration saved successfully.', 'info');
+      ctx?.ui.notify(`pi-http-sniff configuration saved successfully: ${data}`, 'info');
     } catch (error) {
       ctx?.ui.notify(`Error saving config file: ${(error as Error).message}`, 'error');
     }
@@ -205,6 +206,13 @@ export default function (pi: ExtensionAPI) {
     };
   };
 
+  const prettyPrintWarning = (ctx: ExtensionContext) => {
+    ctx.ui.notify(
+      'Enabling pretty print for pi-http-sniff improves readability, but increases the log file size.',
+      'warning',
+    );
+  };
+
   // Enrich a message_end message with timing and token data
   const enrichMessageEnd = (message: Record<string, unknown>): EnrichedMessageEnd => {
     const modelId = typeof message['model'] === 'string' ? message['model'] : 'unknown';
@@ -245,12 +253,27 @@ export default function (pi: ExtensionAPI) {
 
   // Register httpsniff command
   pi.registerCommand('httpsniff', {
-    description:
-      'Sniff all or specific model HTTP requests, pretty print or not. Usage: httpsniff [modelName|all] [pretty] | summary',
+    description: 'Configure pi-http-sniff logging options or view session summary',
     handler: async (args: string, ctx: ExtensionContext): Promise<void> => {
       const argArr = args.split(' ').filter((arg) => arg.trim() !== '');
       const subcommand = argArr[0];
-
+      if (!subcommand) {
+        ctx.ui.notify(
+          'Please provide a subcommand or model name. See "/httpsniff help" for usage.',
+          'error',
+        );
+        return;
+      }
+      if (subcommand === 'help') {
+        ctx.ui.notify(
+          'Usage: httpsniff [modelName|all] [pretty] | pretty|summary|stats|help\n' +
+            '- Provide a model name or "all" to log all models (default: all)\n' +
+            '- Use "pretty" to format logs for readability or toggle between pretty and compact mode\n' +
+            '- Use "summary" or "stats" to view session token usage and cost summary',
+          'info',
+        );
+        return;
+      }
       // Summary subcommand
       if (subcommand === 'summary' || subcommand === 'stats') {
         const totalTokens = sessionStats.totalInputTokens + sessionStats.totalOutputTokens;
@@ -264,20 +287,34 @@ export default function (pi: ExtensionAPI) {
           `  Cache read:        ${sessionStats.totalCacheReadTokens.toLocaleString()}`,
           `  Cache write:       ${sessionStats.totalCacheWriteTokens.toLocaleString()}`,
           `  Estimated cost:    $${sessionStats.totalCost.toFixed(6)}`,
+          `  Pretty print:      ${httpSniffConfig.prettyPrint ? 'Enabled' : 'Disabled'}`,
+          `  Model filter:      ${httpSniffConfig.modelFilter}`,
         ];
         ctx.ui.notify(lines.join('\n'), 'info');
         return;
       }
 
-      const modelName = subcommand || 'all';
+      if (subcommand === 'pretty') {
+        saveConfig(ctx, {
+          ...httpSniffConfig,
+          prettyPrint: !httpSniffConfig.prettyPrint,
+        });
+        httpSniffConfig = loadConfig(ctx);
+        if (httpSniffConfig.prettyPrint) {
+          prettyPrintWarning(ctx);
+        }
+        return;
+      }
+
+      // If we reach here, the subcommand is treated as a model filter
       const isPretty = argArr.includes('pretty');
-      if (modelName.toLowerCase() !== 'all') {
+      if (subcommand.toLowerCase() !== 'all') {
         const validModel = ctx.modelRegistry
           .getAll()
-          .some((model) => model.id === modelName || model.name === modelName);
+          .some((model) => model.id === subcommand || model.name === subcommand);
         if (!validModel) {
           ctx.ui.notify(
-            `Model "${modelName}" not found. Please provide a valid model name or ID.`,
+            `Model "${subcommand}" not found. Please provide a valid model name or ID.`,
             'error',
           );
           return;
@@ -285,11 +322,14 @@ export default function (pi: ExtensionAPI) {
       }
       saveConfig(ctx, {
         ...httpSniffConfig,
-        modelFilter: modelName || 'all',
-        prettyPrint: isPretty,
+        modelFilter: subcommand,
+        prettyPrint: isPretty || httpSniffConfig.prettyPrint,
       });
       // Load updated config
       httpSniffConfig = loadConfig(ctx);
+      if (httpSniffConfig.prettyPrint) {
+        prettyPrintWarning(ctx);
+      }
     },
   });
 

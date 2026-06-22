@@ -8,8 +8,10 @@ A [Pi Coding Agent](https://github.com/earendil-works/pi) extension that **sniff
 
 - Logs full **request and response payloads** for LLM API calls
 - **Filters by model** — log all models or only specific ones
-- **Pretty-print** or compact JSONL output
+- **Pretty-print** or compact JSON output
 - **Session lifecycle tracking** — start, shutdown, requests, and responses
+- **Queue-based request/response correlation** per model for better latency tracking under concurrent requests
+- **Non-blocking async log writes** that preserve event order
 - **Persistent config** stored in `~/.pi/pi-http-sniff.json`
 - **UI notifications** for config changes and errors
 
@@ -20,7 +22,7 @@ A [Pi Coding Agent](https://github.com/earendil-works/pi) extension that **sniff
 | `session_start` | Session initialization with metadata |
 | `session_shutdown` | Session termination event |
 | `before_provider_request` | Full request payload sent to the LLM provider |
-| `after_provider_response` | Response payload received from the provider |
+| `after_provider_response` | Provider response metadata (`status` and `headers`) captured before stream consumption |
 | `message_end` | Assistant message with actual token counts, timing, and costs |
 
 ## Installation
@@ -70,7 +72,11 @@ Configuration is saved to `~/.pi/pi-http-sniff.json` and managed via the `httpsn
 
 ### Log output
 
-Logs are written to `~/.pi/logs/pi-http-sniff-{sessionId}.jsonl`, one JSON event per line.
+Logs are written to `~/.pi/logs/pi-http-sniff-{sessionId}.jsonl`.
+
+- Compact mode (`prettyPrint: false`) writes one JSON object per line (JSONL-compatible).
+- Pretty mode (`prettyPrint: true`) writes human-readable multiline JSON blocks.
+- `after_provider_response` events are always logged. The hook payload currently includes `status` and `headers` but no model identifier, so strict per-model filtering is not available for that specific event.
 
 ## Use cases
 
@@ -78,7 +84,7 @@ Logs are written to `~/.pi/logs/pi-http-sniff-{sessionId}.jsonl`, one JSON event
 - Understanding prompt construction and token usage
 - Auditing API traffic
 - Monitoring multi-model sessions
-- **Latency debugging** — `time_to_first_token_ms` and `response_time_ms` in enriched logs
+- **Latency debugging** — `response_time_ms` in enriched logs
 - **Cost tracking** — actual `input_tokens`, `output_tokens`, and `cost_usd` per request
 
 ## Session Summary
@@ -96,8 +102,8 @@ httpsniff summary
   Input tokens:      12,450
   Output tokens:     3,210
   Total tokens:      15,660
-  Cache read:        —
-  Cache write:       —
+  Cache read:        8,192
+  Cache write:       512
   Estimated cost:    $0.003240
 ```
 

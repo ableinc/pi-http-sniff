@@ -324,6 +324,12 @@ export default function (pi: ExtensionAPI) {
     },
   );
 
+  // Log provider response metadata (status + headers)
+  // Note: event type is 'unknown' because pi-coding-agent does not currently export typings for this event's payload
+  pi.on('after_provider_response', (event: unknown, ctx: ExtensionContext): void => {
+    void writeLogData(ctx.sessionManager.getSessionId(), formatEventData(event), ctx);
+  });
+
   // Log when a message ends — enriched with actual token counts and timing
   pi.on('message_end' as const, (event: unknown, ctx: ExtensionContext): void => {
     if (!event || typeof event !== 'object') {

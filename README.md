@@ -21,6 +21,7 @@ A [Pi Coding Agent](https://github.com/earendil-works/pi) extension that **sniff
 | `session_shutdown` | Session termination event |
 | `before_provider_request` | Full request payload sent to the LLM provider |
 | `after_provider_response` | Response payload received from the provider |
+| `message_end` | Assistant message with actual token counts, timing, and costs |
 
 ## Installation
 
@@ -77,6 +78,55 @@ Logs are written to `~/.pi/logs/pi-http-sniff-{sessionId}.jsonl`, one JSON event
 - Understanding prompt construction and token usage
 - Auditing API traffic
 - Monitoring multi-model sessions
+- **Latency debugging** — `time_to_first_token_ms` and `response_time_ms` in enriched logs
+- **Cost tracking** — actual `input_tokens`, `output_tokens`, and `cost_usd` per request
+
+## Session Summary
+
+View a real-time summary of the current session's token usage and costs:
+
+```
+httpsniff summary
+```
+
+```
+🔍 pi-http-sniff Session Summary
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Requests:          5
+  Input tokens:      12,450
+  Output tokens:     3,210
+  Total tokens:      15,660
+  Cache read:        —
+  Cache write:       —
+  Estimated cost:    $0.003240
+```
+
+The summary is also available via the `stats` alias: `httpsniff stats`.
+
+## Log Enrichment
+
+All logged events include a `sniff_enriched` field with additional metadata:
+
+### `before_provider_request` enrichment
+
+| Field | Description |
+|---|---|
+| `request_time` | Epoch milliseconds when the request was sent |
+| `request_time_iso` | ISO 8601 timestamp of the request |
+
+### `message_end` enrichment
+
+| Field | Description |
+|---|---|
+| `model` | Model ID (e.g. `gpt-4o`, `claude-sonnet-4-20250514`) |
+| `stop_reason` | Why generation stopped (`stop`, `length`, `toolUse`, `error`, `aborted`) |
+| `response_time_ms` | Time from request send to first token received |
+| `input_tokens` | Actual input tokens consumed |
+| `output_tokens` | Actual output tokens generated |
+| `total_tokens` | Sum of input + output tokens |
+| `cache_read_tokens` | Tokens read from prompt cache |
+| `cache_write_tokens` | Tokens written to prompt cache |
+| `cost_usd` | Estimated cost in USD for this request |
 
 ## Development
 

@@ -9,6 +9,44 @@ import type {
   SessionStartEvent,
 } from '@earendil-works/pi-coding-agent';
 
+interface TokenUsage {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  cost?: Record<string, unknown>;
+}
+
+interface EnrichedMessageEnd {
+  type: 'message_end';
+  message: Record<string, unknown>;
+  sniff_enriched: {
+    model: string;
+    stop_reason: string | null;
+    response_time_ms: number | null;
+    input_tokens: number | null;
+    output_tokens: number | null;
+    total_tokens: number | null;
+    cache_read_tokens: number | null;
+    cache_write_tokens: number | null;
+    cost_usd: number | null;
+  };
+}
+
+interface EnrichedRequest {
+  type: 'before_provider_request';
+  payload: unknown;
+  sniff_enriched: {
+    request_time: number;
+    request_time_iso: string;
+  };
+}
+
+interface PendingRequest {
+  timestamp: number;
+  modelId: string;
+}
+
 interface PiHttpSniffConfig {
   modelFilter: string | 'all';
   prettyPrint: boolean;
@@ -23,6 +61,18 @@ export default function (pi: ExtensionAPI) {
   mkdirSync(logPath, {
     recursive: true,
   });
+
+  // Track pending requests keyed by model ID for request-response matching
+  const pendingRequests: Map<string, PendingRequest> = new Map();
+
+  // Session stats for the summary command
+  const sessionStats = {
+    totalRequests: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCost: 0,
+  };
+
   // Helper function to load config
   const loadConfig = (ctx?: ExtensionContext): PiHttpSniffConfig => {
     if (!existsSync(configPath)) {
@@ -46,6 +96,7 @@ export default function (pi: ExtensionAPI) {
       };
     }
   };
+
   // Helper function to save config
   const saveConfig = (ctx: ExtensionContext | undefined, config: PiHttpSniffConfig): void => {
     try {
@@ -58,8 +109,10 @@ export default function (pi: ExtensionAPI) {
       ctx?.ui.notify(`Error saving config file: ${(error as Error).message}`, 'error');
     }
   };
+
   // Load initial config
   let httpSniffConfig = loadConfig();
+
   // Helper function to write to logs
   const writeLogData = (sessionId: string, data: string): void => {
     const filePath = join(logPath, `pi-http-sniff-${sessionId}.jsonl`);
@@ -75,18 +128,136 @@ export default function (pi: ExtensionAPI) {
       });
     }
   };
+
   // Format event data based on prettyPrint setting
   const formatEventData = (data: unknown): string => {
     return httpSniffConfig.prettyPrint ? JSON.stringify(data, null, 2) : JSON.stringify(data);
   };
 
+  // Enrich a before_provider_request event with timing
+  const enrichRequest = (event: BeforeProviderRequestEvent): EnrichedRequest => {
+    const now = Date.now();
+    return {
+      type: event.type,
+      payload: event.payload,
+      sniff_enriched: {
+        request_time: now,
+        request_time_iso: new Date(now).toISOString(),
+      },
+    };
+  };
+
+  // Extract model ID from the provider payload
+  const extractModelId = (payload: unknown): string | undefined => {
+    if (payload && typeof payload === 'object') {
+      const obj = payload as Record<string, unknown>;
+      return typeof obj['model'] === 'string' ? obj['model'] : undefined;
+    }
+    return undefined;
+  };
+
+  // Try to match a message with a pending request
+  const matchPendingRequest = (messageTimestamp: number, modelId: string): number | null => {
+    const pending = pendingRequests.get(modelId);
+    if (!pending) return null;
+    pendingRequests.delete(modelId);
+    return messageTimestamp - pending.timestamp;
+  };
+
+  // Extract token usage from the message payload
+  const extractUsage = (
+    message: Record<string, unknown>,
+  ): {
+    input: number | null;
+    output: number | null;
+    cacheRead: number | null;
+    cacheWrite: number | null;
+    cost: number | null;
+  } => {
+    const rawUsage = message['usage'];
+    if (!rawUsage || typeof rawUsage !== 'object') {
+      return { input: null, output: null, cacheRead: null, cacheWrite: null, cost: null };
+    }
+    const usage = rawUsage as TokenUsage;
+    const costObj = usage.cost;
+    const cost =
+      costObj && typeof costObj === 'object'
+        ? typeof costObj['total'] === 'number'
+          ? costObj['total']
+          : null
+        : null;
+    return {
+      input: typeof usage.input === 'number' ? usage.input : null,
+      output: typeof usage.output === 'number' ? usage.output : null,
+      cacheRead: typeof usage.cacheRead === 'number' ? usage.cacheRead : null,
+      cacheWrite: typeof usage.cacheWrite === 'number' ? usage.cacheWrite : null,
+      cost,
+    };
+  };
+
+  // Enrich a message_end message with timing and token data
+  const enrichMessageEnd = (message: Record<string, unknown>): EnrichedMessageEnd => {
+    const modelId = typeof message['model'] === 'string' ? message['model'] : 'unknown';
+    const messageTimestamp =
+      typeof message['timestamp'] === 'number' ? message['timestamp'] : Date.now();
+    const stopReason = typeof message['stopReason'] === 'string' ? message['stopReason'] : null;
+
+    // Match with pending request if available
+    const timeToFirstToken = matchPendingRequest(messageTimestamp, modelId);
+
+    // Extract token usage
+    const usage = extractUsage(message);
+
+    // Update session stats
+    if (usage.input !== null) sessionStats.totalInputTokens += usage.input;
+    if (usage.output !== null) sessionStats.totalOutputTokens += usage.output;
+    if (usage.cost !== null) sessionStats.totalCost += usage.cost;
+
+    return {
+      type: 'message_end',
+      message: message,
+      sniff_enriched: {
+        model: modelId,
+        stop_reason: stopReason,
+        response_time_ms: timeToFirstToken,
+        input_tokens: usage.input,
+        output_tokens: usage.output,
+        total_tokens:
+          usage.input !== null && usage.output !== null ? usage.input + usage.output : null,
+        cache_read_tokens: usage.cacheRead,
+        cache_write_tokens: usage.cacheWrite,
+        cost_usd: usage.cost,
+      },
+    };
+  };
+
   // Register httpsniff command
   pi.registerCommand('httpsniff', {
     description:
-      'Sniff all or specific model HTTP requests, pretty print or not. Usage: httpsniff [modelName|all] [pretty]',
+      'Sniff all or specific model HTTP requests, pretty print or not. Usage: httpsniff [modelName|all] [pretty] | summary',
     handler: async (args: string, ctx: ExtensionContext): Promise<void> => {
       const argArr = args.split(' ').filter((arg) => arg.trim() !== '');
-      const modelName = argArr[0] || 'all';
+      const subcommand = argArr[0];
+
+      // Summary subcommand
+      if (subcommand === 'summary' || subcommand === 'stats') {
+        const totalTokens = sessionStats.totalInputTokens + sessionStats.totalOutputTokens;
+        const lines = [
+          '🔍 pi-http-sniff Session Summary',
+          '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+          `  Requests:          ${sessionStats.totalRequests}`,
+          `  Input tokens:      ${sessionStats.totalInputTokens.toLocaleString()}`,
+          `  Output tokens:     ${sessionStats.totalOutputTokens.toLocaleString()}`,
+          `  Total tokens:      ${totalTokens.toLocaleString()}`,
+          `  Cache read:        —`,
+          `  Cache write:       —`,
+          `  Estimated cost:    $${sessionStats.totalCost.toFixed(6)}`,
+        ];
+        ctx.ui.notify(lines.join('\n'), 'info');
+        return;
+      }
+
+      const modelName = subcommand || 'all';
       const isPretty = argArr.includes('pretty');
       if (modelName.toLowerCase() !== 'all') {
         const validModel = ctx.modelRegistry
@@ -120,23 +291,39 @@ export default function (pi: ExtensionAPI) {
     writeLogData(ctx.sessionManager.getSessionId(), formatEventData(event));
   });
 
-  // Append request payload to logs
+  // Append enriched request payload to logs
   pi.on(
     'before_provider_request',
     (event: BeforeProviderRequestEvent, ctx: ExtensionContext): void => {
       if (
         httpSniffConfig.modelFilter !== 'all' &&
-        (event.payload as { model: string; [key: string]: unknown }).model !==
-          httpSniffConfig.modelFilter
+        (event.payload as Record<string, unknown>)['model'] !== httpSniffConfig.modelFilter
       ) {
         return;
       }
-      writeLogData(ctx.sessionManager.getSessionId(), formatEventData(event));
+      const enriched = enrichRequest(event);
+      const modelId = extractModelId(event.payload);
+      if (modelId) {
+        pendingRequests.set(modelId, {
+          timestamp: enriched.sniff_enriched.request_time,
+          modelId,
+        });
+      }
+      writeLogData(ctx.sessionManager.getSessionId(), formatEventData(enriched));
     },
   );
 
-  // Append response payload to logs
-  pi.on('after_provider_response', (event, ctx: ExtensionContext): void => {
-    writeLogData(ctx.sessionManager.getSessionId(), formatEventData(event));
+  // Log when a message ends — enriched with actual token counts and timing
+  pi.on('message_end' as const, (event: unknown, ctx: ExtensionContext): void => {
+    const msg = (event as Record<string, unknown>)['message'] as Record<string, unknown>;
+    const modelId = typeof msg['model'] === 'string' ? msg['model'] : 'unknown';
+
+    if (httpSniffConfig.modelFilter !== 'all' && modelId !== httpSniffConfig.modelFilter) {
+      return;
+    }
+
+    sessionStats.totalRequests++;
+    const enriched = enrichMessageEnd(msg);
+    writeLogData(ctx.sessionManager.getSessionId(), formatEventData(enriched));
   });
 }

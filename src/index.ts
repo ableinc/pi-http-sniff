@@ -1,4 +1,5 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type {
@@ -44,7 +45,6 @@ interface EnrichedRequest {
 
 interface PendingRequest {
   timestamp: number;
-  modelId: string;
 }
 
 interface PiHttpSniffConfig {
@@ -63,13 +63,18 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Track pending requests keyed by model ID for request-response matching
-  const pendingRequests: Map<string, PendingRequest> = new Map();
+  const pendingRequests: Map<string, PendingRequest[]> = new Map();
+
+  // Serialize async writes to preserve log order without blocking event handlers.
+  let logWriteQueue: Promise<void> = Promise.resolve();
 
   // Session stats for the summary command
   const sessionStats = {
     totalRequests: 0,
     totalInputTokens: 0,
     totalOutputTokens: 0,
+    totalCacheReadTokens: 0,
+    totalCacheWriteTokens: 0,
     totalCost: 0,
   };
 
@@ -114,19 +119,18 @@ export default function (pi: ExtensionAPI) {
   let httpSniffConfig = loadConfig();
 
   // Helper function to write to logs
-  const writeLogData = (sessionId: string, data: string): void => {
+  const writeLogData = (sessionId: string, data: string, ctx?: ExtensionContext): Promise<void> => {
     const filePath = join(logPath, `pi-http-sniff-${sessionId}.jsonl`);
-    if (!existsSync(filePath)) {
-      writeFileSync(filePath, `${data}\n`, {
-        flag: 'w',
-        encoding: 'utf8',
+    logWriteQueue = logWriteQueue
+      .then(async () => {
+        await appendFile(filePath, `${data}\n`, {
+          encoding: 'utf8',
+        });
+      })
+      .catch((error: unknown) => {
+        ctx?.ui.notify(`Error writing log data: ${(error as Error).message}`, 'error');
       });
-    } else {
-      appendFileSync(filePath, `${data}\n`, {
-        flag: 'a',
-        encoding: 'utf8',
-      });
-    }
+    return logWriteQueue;
   };
 
   // Format event data based on prettyPrint setting
@@ -158,10 +162,16 @@ export default function (pi: ExtensionAPI) {
 
   // Try to match a message with a pending request
   const matchPendingRequest = (messageTimestamp: number, modelId: string): number | null => {
-    const pending = pendingRequests.get(modelId);
+    const queue = pendingRequests.get(modelId);
+    if (!queue || queue.length === 0) return null;
+
+    const pending = queue.shift();
+    if (queue.length === 0) {
+      pendingRequests.delete(modelId);
+    }
+
     if (!pending) return null;
-    pendingRequests.delete(modelId);
-    return messageTimestamp - pending.timestamp;
+    return Math.max(0, messageTimestamp - pending.timestamp);
   };
 
   // Extract token usage from the message payload
@@ -211,6 +221,8 @@ export default function (pi: ExtensionAPI) {
     // Update session stats
     if (usage.input !== null) sessionStats.totalInputTokens += usage.input;
     if (usage.output !== null) sessionStats.totalOutputTokens += usage.output;
+    if (usage.cacheRead !== null) sessionStats.totalCacheReadTokens += usage.cacheRead;
+    if (usage.cacheWrite !== null) sessionStats.totalCacheWriteTokens += usage.cacheWrite;
     if (usage.cost !== null) sessionStats.totalCost += usage.cost;
 
     return {
@@ -249,8 +261,8 @@ export default function (pi: ExtensionAPI) {
           `  Input tokens:      ${sessionStats.totalInputTokens.toLocaleString()}`,
           `  Output tokens:     ${sessionStats.totalOutputTokens.toLocaleString()}`,
           `  Total tokens:      ${totalTokens.toLocaleString()}`,
-          `  Cache read:        —`,
-          `  Cache write:       —`,
+          `  Cache read:        ${sessionStats.totalCacheReadTokens.toLocaleString()}`,
+          `  Cache write:       ${sessionStats.totalCacheWriteTokens.toLocaleString()}`,
           `  Estimated cost:    $${sessionStats.totalCost.toFixed(6)}`,
         ];
         ctx.ui.notify(lines.join('\n'), 'info');
@@ -283,39 +295,47 @@ export default function (pi: ExtensionAPI) {
 
   // Create log file on session_start lifecycle
   pi.on('session_start', (event: SessionStartEvent, ctx: ExtensionContext): void => {
-    writeLogData(ctx.sessionManager.getSessionId(), formatEventData(event));
+    void writeLogData(ctx.sessionManager.getSessionId(), formatEventData(event), ctx);
   });
 
   // Log when session ends
   pi.on('session_shutdown', (event: SessionShutdownEvent, ctx: ExtensionContext): void => {
-    writeLogData(ctx.sessionManager.getSessionId(), formatEventData(event));
+    void writeLogData(ctx.sessionManager.getSessionId(), formatEventData(event), ctx);
   });
 
   // Append enriched request payload to logs
   pi.on(
     'before_provider_request',
     (event: BeforeProviderRequestEvent, ctx: ExtensionContext): void => {
-      if (
-        httpSniffConfig.modelFilter !== 'all' &&
-        (event.payload as Record<string, unknown>)['model'] !== httpSniffConfig.modelFilter
-      ) {
+      const modelId = extractModelId(event.payload);
+      if (httpSniffConfig.modelFilter !== 'all' && modelId !== httpSniffConfig.modelFilter) {
         return;
       }
+
       const enriched = enrichRequest(event);
-      const modelId = extractModelId(event.payload);
       if (modelId) {
-        pendingRequests.set(modelId, {
+        const queue = pendingRequests.get(modelId) ?? [];
+        queue.push({
           timestamp: enriched.sniff_enriched.request_time,
-          modelId,
         });
+        pendingRequests.set(modelId, queue);
       }
-      writeLogData(ctx.sessionManager.getSessionId(), formatEventData(enriched));
+      void writeLogData(ctx.sessionManager.getSessionId(), formatEventData(enriched), ctx);
     },
   );
 
   // Log when a message ends — enriched with actual token counts and timing
   pi.on('message_end' as const, (event: unknown, ctx: ExtensionContext): void => {
-    const msg = (event as Record<string, unknown>)['message'] as Record<string, unknown>;
+    if (!event || typeof event !== 'object') {
+      return;
+    }
+
+    const rawMessage = (event as Record<string, unknown>)['message'];
+    if (!rawMessage || typeof rawMessage !== 'object') {
+      return;
+    }
+
+    const msg = rawMessage as Record<string, unknown>;
     const modelId = typeof msg['model'] === 'string' ? msg['model'] : 'unknown';
 
     if (httpSniffConfig.modelFilter !== 'all' && modelId !== httpSniffConfig.modelFilter) {
@@ -324,6 +344,6 @@ export default function (pi: ExtensionAPI) {
 
     sessionStats.totalRequests++;
     const enriched = enrichMessageEnd(msg);
-    writeLogData(ctx.sessionManager.getSessionId(), formatEventData(enriched));
+    void writeLogData(ctx.sessionManager.getSessionId(), formatEventData(enriched), ctx);
   });
 }

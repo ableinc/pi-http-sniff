@@ -1,6 +1,6 @@
 {
   "name": "pi-http-sniff",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "author": {
     "name": "Jaylen Douglas",
     "email": "hello@jaylendouglas.com",
@@ -30,9 +30,21 @@
     "format": "biome format",
     "fix": "biome check --fix"
   },
-  "keywords": ["pi-package", "pi", "pi-coding-agent", "http", "sniffer", "proxy", "typescript", "http-request", "http-response"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "http",
+    "sniffer",
+    "proxy",
+    "typescript",
+    "http-request",
+    "http-response"
+  ],
   "pi": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
   "publishConfig": {
     "access": "public"

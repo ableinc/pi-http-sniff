@@ -6,7 +6,16 @@
     "email": "hello@jaylendouglas.com",
     "url": "https://jaylendouglas.com"
   },
-  "description": "",
+  "description": "A Pi Coding Agent extension that logs HTTP traffic to and from LLM providers.",
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ableinc/pi-http-sniff.git"
+  },
+  "homepage": "https://github.com/ableinc/pi-http-sniff#readme",
+  "bugs": {
+    "url": "https://github.com/ableinc/pi-http-sniff/issues"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -15,12 +24,19 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
+    "prepublishOnly": "pnpm build",
     "start": "node dist/index.js",
     "lint": "biome check",
     "format": "biome format",
     "fix": "biome check --fix"
   },
-  "keywords": ["http", "sniffer", "proxy", "typescript", "pi-coding-agent"],
+  "keywords": ["pi-package", "pi", "pi-coding-agent", "http", "sniffer", "proxy", "typescript", "http-request", "http-response"],
+  "pi": {
+    "extensions": ["./dist/index.js"]
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "ISC",
   "devEngines": {
     "packageManager": {
